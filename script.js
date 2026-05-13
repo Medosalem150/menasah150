@@ -13,7 +13,7 @@ const DB_KEYS = {
     BOOKS: 'app_books'
 };
 
-const API_BASE_URL = 'http://localhost:3000/api';
+const API_BASE_URL = 'https://medosalem150.github.io/menasah150/';
 
 const DEFAULT_ADMIN = { email: 'admin@edu.com', password: 'admin', role: 'admin' };
 
