@@ -13,6 +13,8 @@ const DB_KEYS = {
     BOOKS: 'app_books'
 };
 
+const API_BASE_URL = 'http://localhost:3000/api';
+
 const DEFAULT_ADMIN = { email: 'admin@edu.com', password: 'admin', role: 'admin' };
 
 const INITIAL_COURSES = [
@@ -123,6 +125,11 @@ class Database {
     static registerParent(name, phone, email, password, childEmail) {
         let users = this.get(DB_KEYS.USERS);
         if (users.find(u => u.email === email)) return false; // Exists
+        
+        // Final check for child existence
+        let child = users.find(u => u.email === childEmail && u.role === 'student');
+        if (!child) return false;
+
         users.push({ name, phone, email, password, role: 'parent', childEmail: childEmail });
         this.set(DB_KEYS.USERS, users);
         return true;
@@ -140,6 +147,9 @@ class Database {
         if(!user.purchasedBooks) user.purchasedBooks = [];
         if(!user.purchasedBooks.includes(bookId)) user.purchasedBooks.push(bookId);
         
+        if(typeof user.totalSpent === 'undefined') user.totalSpent = 0;
+        user.totalSpent += parseFloat(price);
+
         this.updateSession(user);
         return { success: true, msg: 'تم شراء المذكرة بنجاح!' };
     }
@@ -224,6 +234,9 @@ class Database {
         if(!user.enrolled) user.enrolled = [];
         if(!user.enrolled.includes(courseId)) user.enrolled.push(courseId);
         
+        if(typeof user.totalSpent === 'undefined') user.totalSpent = 0;
+        user.totalSpent += parseFloat(price);
+
         this.updateSession(user);
         return { success: true, msg: 'تم شراء الدورة كاملة بنجاح!' };
     }
@@ -241,6 +254,9 @@ class Database {
         let lessonKey = `${courseId}_${lessonId}`;
         if(!user.enrolledLessons.includes(lessonKey)) user.enrolledLessons.push(lessonKey);
         
+        if(typeof user.totalSpent === 'undefined') user.totalSpent = 0;
+        user.totalSpent += parseFloat(price);
+
         this.updateSession(user);
         return { success: true, msg: 'تم شراء الدرس بنجاح!' };
     }
@@ -256,6 +272,128 @@ class Database {
         let user = this.getSession();
         if(!user || user.role === 'admin') return true;
         return user.enrolledLessons && user.enrolledLessons.includes(`${courseId}_${lessonId}`);
+    }
+
+    static getUserTotalSpent(user) {
+        if (typeof user.totalSpent !== 'undefined') return user.totalSpent;
+        
+        let courses = this.get(DB_KEYS.COURSES);
+        let books = this.get(DB_KEYS.BOOKS);
+        let total = 0;
+        
+        if (user.enrolled) {
+            user.enrolled.forEach(cId => {
+                let c = courses.find(x => x.id === cId);
+                if (c) total += parseFloat(c.price || 0);
+            });
+        }
+        
+        if (user.enrolledLessons) {
+            user.enrolledLessons.forEach(lKey => {
+                let [cId, lId] = lKey.split('_');
+                let c = courses.find(x => x.id === cId);
+                if (c) {
+                    let l = c.lessons.find(x => x.id === lId);
+                    if (l) total += parseFloat(l.price || 0);
+                }
+            });
+        }
+
+        if (user.purchasedBooks) {
+            user.purchasedBooks.forEach(bId => {
+                let b = books.find(x => x.id === bId);
+                if (b) total += parseFloat(b.price || 0);
+            });
+        }
+        
+        return total;
+    }
+}
+
+/**
+ * OTP Verification Service
+ */
+const VerificationService = {
+    async sendOTP(email) {
+        try {
+            const response = await fetch(`${API_BASE_URL}/send-otp`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email })
+            });
+            return await response.json();
+        } catch (error) {
+            console.error('Error sending OTP:', error);
+            return { success: false, error: 'تعذر الاتصال بالسيرفر' };
+        }
+    },
+
+    async verifyOTP(email, otp) {
+        try {
+            const response = await fetch(`${API_BASE_URL}/verify-otp`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, otp })
+            });
+            return await response.json();
+        } catch (error) {
+            console.error('Error verifying OTP:', error);
+            return { success: false, error: 'تعذر الاتصال بالسيرفر' };
+        }
+    },
+
+    showOTPModal(email, onVerified) {
+        const modalRoot = document.getElementById('modal-root');
+        modalRoot.innerHTML = `
+            <div class="modal-overlay">
+                <div class="modal-dialog">
+                    <div class="modal-header">
+                        <h3><i class="fa-solid fa-envelope-circle-check text-accent"></i> تفعيل الحساب</h3>
+                        <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">&times;</button>
+                    </div>
+                    <div class="text-center mb-6">
+                        <p>لقد أرسلنا كود التفعيل إلى بريدك الإلكتروني:</p>
+                        <strong class="text-accent">${email}</strong>
+                        <p class="text-muted mt-2" style="font-size:0.85rem;">يرجى التحقق من صندوق الوارد (أو الرسائل غير المرغوب فيها).</p>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label text-center">أدخل الكود المكون من 6 أرقام</label>
+                        <input type="text" id="otp_input" class="form-control text-center" maxlength="6" placeholder="000000" style="letter-spacing: 10px; font-size: 2rem; font-weight: 800;">
+                    </div>
+                    <button id="verify_otp_btn" class="btn btn-primary w-100" style="width:100%">تأكيد وتفعيل الحساب <i class="fa-solid fa-check"></i></button>
+                    <div class="text-center mt-4">
+                        <button class="btn-link text-muted" style="background:none; border:none; text-decoration:underline; cursor:pointer;" onclick="window.resendOTP('${email}')">إعادة إرسال الكود</button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        document.getElementById('verify_otp_btn').onclick = async () => {
+            const otp = document.getElementById('otp_input').value.trim();
+            if (otp.length !== 6) return UI.showToast('يرجى إدخال كود صحيح مكون من 6 أرقام', 'error');
+
+            const btn = document.getElementById('verify_otp_btn');
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> جاري التحقق...';
+            btn.disabled = true;
+
+            const res = await this.verifyOTP(email, otp);
+            if (res.success) {
+                modalRoot.innerHTML = '';
+                UI.showToast('تم التحقق بنجاح!');
+                onVerified();
+            } else {
+                UI.showToast(res.error || 'الكود غير صحيح', 'error');
+                btn.innerHTML = 'تأكيد وتفعيل الحساب <i class="fa-solid fa-check"></i>';
+                btn.disabled = false;
+            }
+        };
+
+        window.resendOTP = async (email) => {
+            UI.showToast('جاري إعادة إرسال الكود...');
+            const res = await this.sendOTP(email);
+            if (res.success) UI.showToast('تم إرسال كود جديد بنجاح');
+            else UI.showToast(res.error || 'فشل إرسال الكود', 'error');
+        };
     }
 }
 
@@ -494,19 +632,24 @@ Views.register = () => {
     window.regType = 'student';
     window.switchRegTab = (type) => {
         window.regType = type;
+        const gradeEl = document.getElementById('r_grade');
+        const childEl = document.getElementById('r_child');
+        
         if(type === 'parent') {
             document.getElementById('tabParent').classList.add('active');
             document.getElementById('tabStudent').classList.remove('active');
             document.getElementById('childEmailGroup').style.display = 'block';
-            document.getElementById('r_child').required = true;
+            if(childEl) childEl.required = true;
             document.getElementById('gradeGroup').style.display = 'none';
+            if(gradeEl) gradeEl.required = false;
             document.getElementById('regBtnText').innerHTML = 'متابعة كولي أمر <i class="fa-solid fa-users"></i>';
         } else {
             document.getElementById('tabStudent').classList.add('active');
             document.getElementById('tabParent').classList.remove('active');
             document.getElementById('childEmailGroup').style.display = 'none';
-            document.getElementById('r_child').required = false;
+            if(childEl) childEl.required = false;
             document.getElementById('gradeGroup').style.display = 'block';
+            if(gradeEl) gradeEl.required = true;
             document.getElementById('regBtnText').innerHTML = 'متابعة كطالب <i class="fa-solid fa-arrow-left"></i>';
         }
     };
@@ -522,40 +665,61 @@ Views.register = () => {
 
         let submitBtn = document.getElementById('regBtnText');
         let originalText = submitBtn.innerHTML;
-        submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> جاري التسجيل...';
+        submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> جاري التحقق...';
         submitBtn.disabled = true;
 
-        setTimeout(() => {
-            let res;
-            if(window.regType === 'parent') {
-                res = Database.registerParent(
-                    document.getElementById('r_name').value.trim(), 
-                    document.getElementById('r_phone').value.trim(), 
-                    email, 
-                    document.getElementById('r_pass').value, 
-                    document.getElementById('r_child').value.trim()
-                );
-            } else {
-                let grade = document.getElementById('r_grade') ? document.getElementById('r_grade').value : '1';
-                res = Database.registerChild(
-                    document.getElementById('r_name').value.trim(), 
-                    document.getElementById('r_phone').value.trim(), 
-                    email, 
-                    document.getElementById('r_pass').value, 
-                    grade
-                );
+        // Validation for Parent Registration (Check if child exists first)
+        if (window.regType === 'parent') {
+            const childEmail = document.getElementById('r_child').value.trim();
+            const users = Database.get(DB_KEYS.USERS);
+            const child = users.find(u => u.email === childEmail && u.role === 'student');
+            
+            if (!child) {
+                submitBtn.innerHTML = originalText;
+                submitBtn.disabled = false;
+                return UI.showToast('عذراً، البريد الإلكتروني للطالب غير مسجل بالمنصة. يرجى التأكد من تسجيل حساب ابنك أولاً.', 'error');
             }
+        }
 
+        submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> جاري إرسال كود التفعيل...';
+
+        // Step 1: Send OTP
+        const otpRes = await VerificationService.sendOTP(email);
+        
+        if (!otpRes.success) {
             submitBtn.innerHTML = originalText;
             submitBtn.disabled = false;
+            return UI.showToast(otpRes.error || 'فشل إرسال كود التفعيل، يرجى المحاولة لاحقاً', 'error');
+        }
 
-            if(res) {
-                UI.showToast('تم التسجيل بنجاح، يمكنك تسجيل الدخول الآن!');
+        // Step 2: Show OTP Modal
+        VerificationService.showOTPModal(email, () => {
+            // Step 3: Registration Finalization (only after OTP is verified)
+            let res;
+            const name = document.getElementById('r_name').value.trim();
+            const phone = document.getElementById('r_phone').value.trim();
+            const pass = document.getElementById('r_pass').value;
+
+            if (window.regType === 'parent') {
+                const childEmail = document.getElementById('r_child').value.trim();
+                res = Database.registerParent(name, phone, email, pass, childEmail);
+            } else {
+                const grade = document.getElementById('r_grade') ? document.getElementById('r_grade').value : '1';
+                res = Database.registerChild(name, phone, email, pass, grade);
+            }
+
+            if (res) {
+                UI.showToast('تم إنشاء الحساب وتفعيله بنجاح!');
                 app.navigate('/login');
             } else {
                 UI.showToast('حدث خطأ أثناء حفظ الحساب', 'error');
             }
-        }, 500); // Simulate network delay
+        });
+
+        // Reset button state regardless of success in step 1, 
+        // but note that if success, the modal covers the screen.
+        submitBtn.innerHTML = originalText;
+        submitBtn.disabled = false;
     });
 };
 
@@ -721,7 +885,7 @@ Views.courseDetail = (id) => {
                             ${lessonAccessible ? 
                                 `<button class="btn btn-outline" style="padding: 0.4rem 1rem; border-radius:20px;" onclick="app.navigate('/lesson/${course.id}/${l.id}')"><i class="fa-solid fa-play"></i> عرض المحتوى</button>` 
                                 : 
-                                `<span class="text-danger font-bold mr-3" style="background:rgba(239, 68, 68, 0.1); padding:0.3rem 0.8rem; border-radius:8px;">${l.price || 0} ج.م</span>
+                                `<span class="text-danger font-bold mr-3" style="background:rgba(239, 68, 68, 0.1); padding:0.3rem 0.8rem; border-radius:8px;">${l.price === 0 ? 'FREE' : l.price + ' ج.م'}</span>
                                 <button class="btn btn-secondary" style="padding: 0.4rem 1rem; border-color:var(--clr-accent); color:var(--clr-accent); border-radius:20px;" onclick="window.buySingleLesson('${course.id}', '${l.id}', ${l.price || 0})"><i class="fa-solid fa-cart-shopping"></i> شراء الدرس فقط</button>`
                             }
                         </div>
@@ -1338,35 +1502,45 @@ Views.books = () => {
                 ${books.map(b => {
                     let purchased = session.purchasedBooks && session.purchasedBooks.includes(b.id);
                     return `
-                        <div class="card p-6 shadow-lg" style="display:flex; flex-direction:column; background:var(--clr-surface); border:1px solid var(--clr-border); border-radius: var(--radius-xl); transition: transform 0.3s ease; position:relative;" onmouseover="this.style.transform='translateY(-5px)'" onmouseout="this.style.transform='translateY(0)'">
-                            <div style="height: 250px; margin:-1.5rem -1.5rem 1.5rem -1.5rem; background: linear-gradient(145deg, var(--clr-bg), var(--clr-surface)); border-radius: var(--radius-xl) var(--radius-xl) 0 0; position:relative; display:flex; align-items:center; justify-content:center; padding: 1.5rem;">
+                        <div class="book-card">
+                            <div class="book-card-header">
                                 ${b.image ? `
-                                    <img src="${b.image}" style="max-height:100%; max-width:100%; object-fit:contain; border-radius: 4px; box-shadow: 0 10px 20px rgba(0,0,0,0.5);" alt="غلاف الكتاب">
+                                    <img src="${b.image}" class="book-cover" alt="${b.title}">
                                 ` : `
-                                    <div style="width:140px; height:200px; background:var(--clr-surface-light); border-radius:4px; box-shadow: 0 10px 20px rgba(0,0,0,0.3); display:flex; flex-direction:column; align-items:center; justify-content:center; border: 2px solid var(--clr-border);">
-                                        <i class="fa-solid fa-file-pdf text-accent mb-2" style="font-size:3rem;"></i>
-                                        <span class="text-muted text-xs font-bold text-center" style="font-size:0.8rem;">PDF<br>مذكرة</span>
+                                    <div class="book-cover-placeholder">
+                                        <i class="fa-solid fa-file-pdf"></i>
+                                        <span style="font-size:0.8rem; margin-top:10px;">PDF مذكرة</span>
                                     </div>
                                 `}
                             </div>
                             
-                            <div style="display:flex; flex-direction:column; flex:1;">
-                                <h3 class="mb-2" style="font-size: 1.2rem; line-height: 1.4; text-align:right;">${b.title}</h3>
-                                <p class="text-muted mb-4" style="font-size:0.9rem; flex:1; line-height:1.6; text-align:right;">${b.desc || ''}</p>
+                            <div class="book-card-body">
+                                <h3 class="book-title">${b.title}</h3>
+                                <p class="book-desc">${b.desc || ''}</p>
                                 
-                                <div style="display:flex; flex-direction:column; gap:0.8rem; margin-top:auto; padding-top:1rem; border-top:1px solid var(--clr-border);">
+                                <div class="book-actions">
                                     ${purchased ? `
-                                        <div style="display:flex; align-items:center; justify-content:center; gap:0.5rem; background: rgba(34, 197, 94, 0.1); padding: 0.5rem; border-radius: 8px;">
-                                            <i class="fa-solid fa-check-circle text-success"></i> 
-                                            <span class="text-success font-bold text-sm">تم الشراء مسبقاً</span>
+                                        <div class="status-badge">
+                                            <i class="fa-solid fa-circle-check"></i> تم الشراء مسبقاً
                                         </div>
-                                        <button onclick="app.navigate('/book/${b.id}')" class="btn btn-primary" style="width:100%; text-align:center;"><i class="fa-solid fa-book-open"></i> تصفح الآن</button>
+                                        <div class="action-buttons">
+                                            <button onclick="app.navigate('/book/${b.id}')" class="btn-browse">
+                                                <i class="fa-solid fa-book-open"></i> تصفح الآن
+                                            </button>
+                                            ${b.downloadLink ? `
+                                                <a href="${b.downloadLink}" target="_blank" class="btn-download">
+                                                    <i class="fa-solid fa-download"></i> تحميل
+                                                </a>
+                                            ` : ''}
+                                        </div>
                                     ` : `
-                                        <div style="display:flex; justify-content:space-between; align-items:center; background:var(--clr-bg); padding:1rem; border-radius:8px;">
-                                            <span class="text-muted" style="font-size:0.9rem;">التكلفة:</span>
-                                            <span class="text-accent font-bold" style="font-size:1.1rem;">${b.price === 0 ? 'مجاني' : b.price + ' ج.م'}</span>
+                                        <div class="price-tag">
+                                            <span>التكلفة:</span>
+                                            <strong>${b.price === 0 ? 'مجاني' : b.price + ' ج.م'}</strong>
                                         </div>
-                                        <button class="btn btn-primary" style="width:100%; display:flex; align-items:center; justify-content:center; gap:0.5rem; outline:none; border:none; padding:0.8rem; border-radius:8px;" onclick="window.buyBook('${b.id}', ${b.price})"><i class="fa-solid fa-cart-shopping"></i> اقتناء</button>
+                                        <button class="btn-buy" onclick="window.buyBook('${b.id}', ${b.price})">
+                                            <i class="fa-solid fa-cart-shopping"></i> اقتناء الآن
+                                        </button>
                                     `}
                                 </div>
                             </div>
@@ -1464,12 +1638,18 @@ Views.dashboard = () => {
             <div class="grid grid-3 gap-6">
                 ${myCourses.map(c => `
                     <div class="card cursor-pointer" onclick="app.navigate('/course/${c.id}')">
-                         <div class="card-img-wrapper" style="padding-top: 40%">
-                            <img src="${c.image}" class="card-img">
+                        <div class="card-img-wrapper" style="position:relative;">
+                            <span style="position:absolute; top:10px; right:10px; background:var(--clr-primary); color:white; padding:4px 10px; border-radius:30px; font-size:0.8rem; font-weight:bold; z-index:11;">
+                                ${c.term === '1' ? 'الفصل الأول' : c.term === '2' ? 'الفصل الثاني' : 'عام كامل'}
+                            </span>
+                            <img src="${c.image}" class="card-img" alt="${c.title}">
                         </div>
-                        <div class="card-body p-4">
-                            <h4>${c.title}</h4>
-                            <button class="btn btn-primary w-100 mt-4" style="width:100%">متابعة التعلم</button>
+                        <div class="card-body">
+                            <h3 class="card-title">${c.title}</h3>
+                            <p class="card-desc">${c.desc}</p>
+                            <div class="card-footer mt-auto pt-4">
+                                <button class="btn btn-primary" style="width:100%">متابعة التعلم <i class="fa-solid fa-arrow-left"></i></button>
+                            </div>
                         </div>
                     </div>
                 `).join('')}
@@ -1546,16 +1726,55 @@ window.AdminActions = {
             </div>
             <div class="form-group"><label class="form-label">السعر (ج.م)</label><input type="number" id="bPrice" class="form-control" value="0"></div>
             <div class="form-group"><label class="form-label">رابط صورة الغلاف</label><input type="text" id="bImage" class="form-control" placeholder="https://..."></div>
-            <div class="form-group"><label class="form-label">رابط التحميل / القراءة (رابط PDF)</label><input type="text" id="bLink" class="form-control" placeholder="https://..."></div>
-            <button class="btn btn-primary w-100" style="width:100%" onclick="AdminActions.saveBook()">حفظ وإضافة للمنصة</button>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+                <div class="form-group"><label class="form-label">رابط العرض (للقراءة)</label><input type="text" id="bLink" class="form-control" placeholder="https://..."></div>
+                <div class="form-group"><label class="form-label">رابط التحميل المباشر</label><input type="text" id="bDownloadLink" class="form-control" placeholder="https://..."></div>
+            </div>
+            <button class="btn btn-primary w-100" style="width:100%" onclick="AdminActions.saveBook('add')">حفظ وإضافة للمنصة</button>
         `;
         this.openModal(html);
     },
-    saveBook() {
+    editBook(id) {
+        let book = Database.get(DB_KEYS.BOOKS).find(b => b.id === id);
+        if(!book) return;
+        let html = `
+            <div class="modal-header">
+                <h3 class="mb-0">تعديل كتاب / مذكرة</h3>
+                <button class="modal-close" onclick="AdminActions.closeModal()"><i class="fa-solid fa-times"></i></button>
+            </div>
+            <input type="hidden" id="bId" value="${id}">
+            <div class="form-group"><label class="form-label">عنوان المذكرة</label><input type="text" id="bTitle" class="form-control" value="${book.title}"></div>
+            <div class="form-group"><label class="form-label">وصف مبسط</label><textarea id="bDesc" class="form-control" rows="2">${book.desc || ''}</textarea></div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+                <div class="form-group">
+                    <label class="form-label">الصف الدراسي</label>
+                    <input type="text" id="bGrade" class="form-control" value="${book.grade || ''}">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">الفصل الدراسي</label>
+                    <select id="bTerm" class="form-control" style="background-color: var(--clr-bg);">
+                        <option value="1" ${book.term==='1'?'selected':''}>الفصل الدراسي الأول</option>
+                        <option value="2" ${book.term==='2'?'selected':''}>الفصل الدراسي الثاني</option>
+                        <option value="full" ${book.term==='full'?'selected':''}>عام دراسي كامل</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-group"><label class="form-label">السعر (ج.م)</label><input type="number" id="bPrice" class="form-control" value="${book.price}"></div>
+            <div class="form-group"><label class="form-label">رابط صورة الغلاف</label><input type="text" id="bImage" class="form-control" value="${book.image || ''}"></div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+                <div class="form-group"><label class="form-label">رابط العرض</label><input type="text" id="bLink" class="form-control" value="${book.link}"></div>
+                <div class="form-group"><label class="form-label">رابط التحميل</label><input type="text" id="bDownloadLink" class="form-control" value="${book.downloadLink || ''}"></div>
+            </div>
+            <button class="btn btn-primary w-100" style="width:100%" onclick="AdminActions.saveBook('edit')">حفظ التعديلات</button>
+        `;
+        this.openModal(html);
+    },
+    saveBook(mode) {
         let title = document.getElementById('bTitle').value;
         let desc = document.getElementById('bDesc').value;
         let price = parseFloat(document.getElementById('bPrice').value) || 0;
         let link = document.getElementById('bLink').value;
+        let downloadLink = document.getElementById('bDownloadLink').value;
         let image = document.getElementById('bImage').value;
         let grade = document.getElementById('bGrade').value || 'all';
         let term = document.getElementById('bTerm').value || 'full';
@@ -1563,10 +1782,20 @@ window.AdminActions = {
         if(!title || !link) return UI.showToast('يرجى إدخال العنوان والرابط كحد أدنى', 'error');
         
         let books = Database.get(DB_KEYS.BOOKS);
-        books.push({ id: 'b' + Date.now(), title, desc, price, link, image, grade, term });
-        Database.set(DB_KEYS.BOOKS, books);
         
-        UI.showToast('تم إدراج المذكرة بنجاح');
+        if(mode === 'edit') {
+            let id = document.getElementById('bId').value;
+            let idx = books.findIndex(b => b.id === id);
+            if(idx !== -1) {
+                books[idx] = { ...books[idx], title, desc, price, link, downloadLink, image, grade, term };
+                UI.showToast('تم تعديل المذكرة بنجاح');
+            }
+        } else {
+            books.push({ id: 'b' + Date.now(), title, desc, price, link, downloadLink, image, grade, term });
+            UI.showToast('تم إدراج المذكرة بنجاح');
+        }
+        
+        Database.set(DB_KEYS.BOOKS, books);
         this.closeModal();
         app.route();
     },
@@ -1578,6 +1807,10 @@ window.AdminActions = {
         app.route();
     },
     openModal(html) {
+        if(this.currentModal) {
+            this.currentModal.querySelector('.modal-dialog').innerHTML = html;
+            return;
+        }
         let overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
         overlay.innerHTML = `<div class="modal-dialog">${html}</div>`;
@@ -1585,7 +1818,10 @@ window.AdminActions = {
         this.currentModal = overlay;
     },
     closeModal() {
-        if(this.currentModal) { this.currentModal.remove(); this.currentModal = null; }
+        if(this.currentModal) { 
+            this.currentModal.remove(); 
+            this.currentModal = null; 
+        }
     },
     viewImage(base64) {
         let html = `
@@ -1598,6 +1834,160 @@ window.AdminActions = {
             </div>
         `;
         this.openModal(html);
+    },
+    viewUserDetails(email) {
+        let users = Database.get(DB_KEYS.USERS);
+        let u = users.find(user => user.email === email);
+        if(!u) return UI.showToast('لم يتم العثور على المستخدم', 'error');
+
+        let html = '';
+        if(u.role === 'parent') {
+            let child = users.find(x => x.email === u.childEmail && x.role === 'student');
+            html = `
+                <div class="modal-header" style="margin-bottom: 1.5rem;">
+                    <h3 class="mb-0">تفاصيل ولي الأمر: ${u.name || 'بدون اسم'}</h3>
+                    <button class="modal-close" onclick="AdminActions.closeModal()"><i class="fa-solid fa-times"></i></button>
+                </div>
+                
+                <div class="user-details-grid">
+                    <div class="user-details-card" style="border-color: var(--clr-accent);">
+                        <i class="fa-solid fa-user-tie text-accent"></i>
+                        <div class="val">ولي أمر</div>
+                        <div class="label">نوع الحساب</div>
+                    </div>
+                    <div class="user-details-card" style="border-color: var(--clr-primary);">
+                        <i class="fa-solid fa-phone text-primary"></i>
+                        <div class="val">${u.phone || 'غير مسجل'}</div>
+                        <div class="label">رقم الهاتف</div>
+                    </div>
+                    <div class="user-details-card" style="border-color: var(--clr-success);">
+                        <i class="fa-solid fa-envelope text-success"></i>
+                        <div class="val" style="font-size:0.85rem; word-break:break-all;">${u.email}</div>
+                        <div class="label">البريد الإلكتروني</div>
+                    </div>
+                </div>
+
+                <div class="mt-8 p-6" style="background: var(--clr-bg); border-radius: var(--radius-lg); border: 1px solid var(--clr-border);">
+                    <h4 class="mb-4 text-accent"><i class="fa-solid fa-link"></i> بيانات الطالب المرتبط (الابن):</h4>
+                    ${child ? `
+                        <div style="display:flex; flex-direction:column; gap:12px;">
+                            <div class="flex justify-between border-b pb-2" style="border-color:var(--clr-border);">
+                                <span class="text-muted">اسم الطالب:</span>
+                                <span class="font-bold text-white">${child.name}</span>
+                            </div>
+                            <div class="flex justify-between border-b pb-2" style="border-color:var(--clr-border);">
+                                <span class="text-muted">بريد الطالب:</span>
+                                <span class="font-bold text-white">${child.email}</span>
+                            </div>
+                            <div class="flex justify-between border-b pb-2" style="border-color:var(--clr-border);">
+                                <span class="text-muted">الصف الدراسي:</span>
+                                <span class="badge" style="background:var(--clr-primary); color:white; padding:2px 8px; border-radius:4px;">${child.grade === 'all' ? 'عام' : child.grade}</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-muted">رصيد الطالب حالياً:</span>
+                                <span class="text-accent font-bold">${child.walletBalance || 0} ج.م</span>
+                            </div>
+                            <button class="btn btn-outline mt-4 w-100" onclick="AdminActions.viewUserDetails('${child.email}')" style="width:100%"><i class="fa-solid fa-eye"></i> عرض ملف الطالب الكامل</button>
+                        </div>
+                    ` : `
+                        <div class="text-danger p-4 text-center" style="background:rgba(239, 68, 68, 0.1); border-radius:8px;">
+                            <i class="fa-solid fa-triangle-exclamation mb-2" style="font-size:2rem;"></i><br>
+                            عذراً، لم يتم العثور على حساب الطالب المرتبط بـ (${u.childEmail}) في قاعدة البيانات.
+                        </div>
+                    `}
+                </div>
+            `;
+        } else {
+            let totalSpent = Database.getUserTotalSpent(u);
+            let enrolledCoursesCount = u.enrolled ? u.enrolled.length : 0;
+            let enrolledLessonsCount = u.enrolledLessons ? u.enrolledLessons.length : 0;
+            let examsCount = u.examResults ? u.examResults.length : 0;
+            let courses = Database.get(DB_KEYS.COURSES);
+
+            html = `
+                <div class="modal-header" style="margin-bottom: 1.5rem;">
+                    <h3 class="mb-0">تفاصيل الطالب: ${u.name || 'بدون اسم'}</h3>
+                    <button class="modal-close" onclick="AdminActions.closeModal()"><i class="fa-solid fa-times"></i></button>
+                </div>
+                
+                <div class="user-details-grid">
+                    <div class="user-details-card" style="border-color: var(--clr-accent);">
+                        <i class="fa-solid fa-wallet text-accent"></i>
+                        <div class="val">${u.walletBalance || 0} ج.م</div>
+                        <div class="label">رصيد المحفظة</div>
+                    </div>
+                    <div class="user-details-card" style="border-color: var(--clr-success);">
+                        <i class="fa-solid fa-cart-shopping text-success"></i>
+                        <div class="val">${totalSpent} ج.م</div>
+                        <div class="label">إجمالي المشتريات</div>
+                    </div>
+                    <div class="user-details-card">
+                        <i class="fa-solid fa-graduation-cap text-primary"></i>
+                        <div class="val">${enrolledCoursesCount}</div>
+                        <div class="label">دورات مشترك بها</div>
+                    </div>
+                    <div class="user-details-card">
+                        <i class="fa-solid fa-play-circle text-secondary"></i>
+                        <div class="val">${enrolledLessonsCount}</div>
+                        <div class="label">دروس مفرَدة</div>
+                    </div>
+                    <div class="user-details-card">
+                        <i class="fa-solid fa-list-check text-info"></i>
+                        <div class="val">${examsCount}</div>
+                        <div class="label">اختبارات مادية</div>
+                    </div>
+                </div>
+
+                <div class="mt-8">
+                    <h4 class="mb-4 flex items-center gap-2"><i class="fa-solid fa-history text-accent"></i> سجل نتائج الاختبارات</h4>
+                    ${u.examResults && u.examResults.length > 0 ? `
+                        <div class="table-container" style="max-height:250px; overflow-y:auto; border-radius: var(--radius-md);">
+                            <table style="font-size:0.85rem;">
+                                <thead style="position:sticky; top:0; background:var(--clr-surface-light); z-index:1;">
+                                    <tr>
+                                        <th>اسم الاختبار</th>
+                                        <th>الدرجة</th>
+                                        <th>النسبة</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${u.examResults.map(r => {
+                                        let c = courses.find(x => x.id === r.courseId);
+                                        let l = c ? c.lessons.find(x => x.id === r.lessonId) : null;
+                                        return `
+                                            <tr>
+                                                <td class="font-bold">${l ? l.title : 'اختبار غير معروف'}</td>
+                                                <td>${r.score} / ${r.total}</td>
+                                                <td class="font-bold ${r.perc >= 50 ? 'text-success' : 'text-danger'}">${r.perc.toFixed(0)}%</td>
+                                            </tr>
+                                        `;
+                                    }).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    ` : '<div class="text-muted p-6 text-center card" style="background:var(--clr-bg); border-style:dashed;"><i class="fa-solid fa-info-circle mb-2" style="font-size:2rem; opacity:0.3;"></i><br>لا توجد نتائج اختبارات مسجلة لهذا الطالب حتى الآن.</div>'}
+                </div>
+
+                <div class="mt-8 pt-6" style="border-top:1px solid var(--clr-border);">
+                    <div class="grid grid-2 gap-4">
+                        <div class="card p-4 text-center" style="background:var(--clr-bg); border: 1px solid var(--clr-border);">
+                            <div class="label" style="font-size:0.8rem; color:var(--clr-accent); margin-bottom:0.5rem;"><i class="fa-solid fa-envelope"></i> البريد الإلكتروني</div>
+                            <div class="font-bold text-sm" style="word-break: break-all;">${u.email}</div>
+                        </div>
+                        <div class="card p-4 text-center" style="background:var(--clr-bg); border: 1px solid var(--clr-border);">
+                            <div class="label" style="font-size:0.8rem; color:var(--clr-primary); margin-bottom:0.5rem;"><i class="fa-solid fa-phone"></i> رقم الهاتف</div>
+                            <div class="font-bold text-sm">${u.phone || 'غير مسجل'}</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        this.openModal(html);
+        if(this.currentModal) {
+            let dialog = this.currentModal.querySelector('.modal-dialog');
+            if(dialog) dialog.style.maxWidth = '700px';
+        }
     },
     decideReq(id, action) {
         if(!confirm(action === 'approve'? 'هل أنت متأكد من تفعيل الكورس لهذا الطالب؟' : 'هل أنت متأكد من رفض طلب الدفع هذا؟')) return;
@@ -1828,12 +2218,59 @@ window.AdminActions = {
 
         let courses = Database.get(DB_KEYS.COURSES);
         let cIdx = courses.findIndex(c => c.id === courseId);
-        courses[cIdx].lessons.push(newLesson);
-        Database.set(DB_KEYS.COURSES, courses);
         
-        UI.showToast('تم إضافة المحتوى بنجاح');
+        let lIdInput = document.getElementById('lId');
+        if(lIdInput) {
+            let lId = lIdInput.value;
+            let lIdx = courses[cIdx].lessons.findIndex(l => l.id === lId);
+            if(lIdx !== -1) {
+                newLesson.id = lId;
+                courses[cIdx].lessons[lIdx] = newLesson;
+                UI.showToast('تم تحديث المحتوى بنجاح');
+            }
+        } else {
+            courses[cIdx].lessons.push(newLesson);
+            UI.showToast('تم إضافة المحتوى بنجاح');
+        }
+        
+        Database.set(DB_KEYS.COURSES, courses);
         this.closeModal();
         app.route();
+    },
+    editLesson(courseId, lessonId) {
+        let course = Database.get(DB_KEYS.COURSES).find(c => c.id === courseId);
+        let lesson = course.lessons.find(l => l.id === lessonId);
+        this.addLesson(courseId); // Open the same modal
+        
+        // Fill the data
+        document.querySelector('.modal-header h3').innerText = 'تعديل المحتوى التعليمي';
+        document.getElementById('lTitle').value = lesson.title;
+        document.getElementById('lPrice').value = lesson.price;
+        document.getElementById('lType').value = lesson.type;
+        
+        // Add hidden input for lesson ID
+        let hiddenId = document.createElement('input');
+        hiddenId.type = 'hidden';
+        hiddenId.id = 'lId';
+        hiddenId.value = lessonId;
+        document.getElementById('lCourseId').after(hiddenId);
+        
+        this.toggleLessonInputs(); // Re-trigger to show correct fields
+        
+        if(lesson.type === 'exam') {
+            document.getElementById('lReward').value = lesson.reward || 0;
+            document.getElementById('qList').innerHTML = '';
+            lesson.questions.forEach(q => {
+                this.addQuestionField();
+                let qBlocks = document.querySelectorAll('#qList > div');
+                let lastQ = qBlocks[qBlocks.length - 1];
+                lastQ.querySelector('.q-text').value = q.q;
+                lastQ.querySelector('.q-opts').value = q.options.join(', ');
+                lastQ.querySelector('.q-ans').value = q.answer + 1;
+            });
+        } else {
+            document.getElementById('lContent').value = lesson.content;
+        }
     },
     deleteLesson(courseId, lessonId) {
         if(!confirm('هل أنت متأكد من حذف هذا الدرس / الاختبار؟')) return;
@@ -1861,7 +2298,7 @@ Views.admin = () => {
             <button class="tab-btn ${window.adminTab === 'books' ? 'active' : ''}" onclick="window.adminTab='books'; app.route()">المكتبة (المذكرات)</button>
             <button class="tab-btn ${window.adminTab === 'codes' ? 'active' : ''}" onclick="window.adminTab='codes'; app.route()">أكواد الشحن</button>
             <button class="tab-btn ${window.adminTab === 'requests' ? 'active' : ''}" onclick="window.adminTab='requests'; app.route()">طلبات الشحن <span style="background:var(--clr-danger);color:white;padding:2px 8px;border-radius:10px;font-size:0.8rem;margin-right:4px;">${requests.filter(r=>r.status==='pending').length}</span></button>
-            <button class="tab-btn ${window.adminTab === 'settings' ? 'active' : ''}" onclick="window.adminTab='settings'; app.route()">إعدادات الدفع</button>
+            <button class="tab-btn ${window.adminTab === 'settings' ? 'active' : ''}" onclick="window.adminTab='settings'; app.route()">إعدادات المنصة</button>
         </div>
     `;
 
@@ -1922,6 +2359,7 @@ Views.admin = () => {
                                     <td>${u.suspended ? '<span class="text-danger font-bold"><i class="fa-solid fa-ban"></i> معلق</span>' : '<span class="text-success font-bold"><i class="fa-solid fa-check-circle"></i> نشط</span>'}</td>
                                     <td>
                                         <div class="flex gap-2">
+                                            <button class="btn btn-primary" style="padding:0.3rem 0.6rem; border-radius:5px;" onclick="AdminActions.viewUserDetails('${u.email}')" title="عرض التفاصيل الكاملة"><i class="fa-solid fa-eye"></i> تفاصيل</button>
                                             <button class="btn ${u.suspended ? 'btn-success' : 'btn-warning'}" style="padding:0.3rem 0.6rem; border-radius:5px;" onclick="window.toggleUserSuspension('${u.email}')"><i class="fa-solid ${u.suspended ? 'fa-play' : 'fa-pause'}"></i> ${u.suspended ? 'تفعيل' : 'تعليق'}</button>
                                             <button class="btn btn-danger" style="padding:0.3rem 0.6rem; border-radius:5px;" onclick="window.deleteUser('${u.email}')"><i class="fa-solid fa-trash"></i> حذف</button>
                                         </div>
@@ -1977,30 +2415,35 @@ Views.admin = () => {
                     </div>
                     <div class="grid grid-3 gap-6">
                     ${Database.get(DB_KEYS.BOOKS).map(b => `
-                        <div class="card p-4">
-                            ${b.image ? `
-                                <div style="height: 180px; background:var(--clr-bg); display:flex; align-items:center; justify-content:center; margin:-1rem -1rem 1rem -1rem; border-radius:5px 5px 0 0; padding:10px;">
-                                    <img src="${b.image}" style="max-height:100%; max-width:100%; object-fit:contain; box-shadow:0 4px 10px rgba(0,0,0,0.5);">
+                        <div class="book-card admin-card">
+                            <div class="book-card-header" style="height: 200px;">
+                                ${b.image ? `
+                                    <img src="${b.image}" class="book-cover" alt="${b.title}">
+                                ` : `
+                                    <div class="book-cover-placeholder" style="width:100px; height:140px; font-size:2.5rem;">
+                                        <i class="fa-solid fa-file-pdf"></i>
+                                    </div>
+                                `}
+                                <div class="admin-badges">
+                                    <span class="badge-grade">${b.grade && b.grade !== 'all' ? b.grade : 'عام'}</span>
+                                    <span class="badge-term">${!b.term || b.term === 'full' ? 'عام كامل' : b.term === '1' ? 'فصل 1' : 'فصل 2'}</span>
                                 </div>
-                            ` : `
-                                <div style="height: 180px; background:var(--clr-surface-light); display:flex; align-items:center; justify-content:center; margin:-1rem -1rem 1rem -1rem; border-radius:5px 5px 0 0;">
-                                    <i class="fa-solid fa-file-pdf text-muted" style="font-size:3rem;"></i>
-                                </div>
-                            `}
-                            <h4 class="mb-2"><i class="fa-solid fa-book text-accent"></i> ${b.title}</h4>
-                            <div style="display:flex; gap:5px; margin-bottom:10px;">
-                                <span class="badge" style="background:var(--clr-primary); color:white; padding:4px 8px; border-radius:4px; font-size:0.85rem;">
-                                    ${b.grade && b.grade !== 'all' ? b.grade : 'عام (للكل)'}
-                                </span>
-                                <span class="badge" style="background:var(--clr-secondary); color:white; padding:4px 8px; border-radius:4px; font-size:0.85rem;">
-                                    ${!b.term || b.term === 'full' ? 'عام كامل' : b.term === '1' ? 'الفصل الأول' : 'الفصل الثاني'}
-                                </span>
                             </div>
-                            <p class="text-muted mb-4 text-sm" style="flex:1;">${b.desc || 'لا يوجد وصف'}</p>
-                            <p class="font-bold mb-4 bg-surface p-2 text-center" style="border-radius:5px;">السعر المدخل: <span class="text-accent">${b.price} ج.م</span></p>
-                            <div class="flex gap-2 mt-auto">
-                                <a href="${b.link}" target="_blank" class="btn btn-outline flex-1 text-center" style="padding:0.4rem;font-size:0.9rem;"><i class="fa-solid fa-eye"></i> عرض</a>
-                                <button class="btn btn-danger flex-1" style="padding:0.4rem;font-size:0.9rem;" onclick="AdminActions.deleteBook('${b.id}')"><i class="fa-solid fa-trash"></i> حذف</button>
+                            
+                            <div class="book-card-body">
+                                <h3 class="book-title" style="font-size:1.1rem;">${b.title}</h3>
+                                <p class="book-desc" style="font-size:0.85rem; -webkit-line-clamp: 2; display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; height: 2.8rem;">${b.desc || 'لا يوجد وصف'}</p>
+                                
+                                <div class="price-tag mb-4" style="padding:0.5rem 1rem;">
+                                    <span style="font-size:0.8rem;">السعر:</span>
+                                    <strong style="font-size:1rem;">${b.price} ج.م</strong>
+                                </div>
+
+                                <div class="admin-actions-grid">
+                                    <a href="${b.link}" target="_blank" class="btn-admin-view" title="عرض الملف"><i class="fa-solid fa-eye"></i></a>
+                                    <button class="btn-admin-edit" onclick="AdminActions.editBook('${b.id}')" title="تعديل"><i class="fa-solid fa-pen"></i> تعديل</button>
+                                    <button class="btn-admin-delete" onclick="AdminActions.deleteBook('${b.id}')" title="حذف"><i class="fa-solid fa-trash"></i></button>
+                                </div>
                             </div>
                         </div>
                     `).join('')}
@@ -2037,7 +2480,10 @@ Views.admin = () => {
                                                 <i class="fa-solid ${l.type==='video'?'fa-video':l.type==='pdf'?'fa-file-pdf':'fa-list-check'} text-accent"></i> 
                                                 ${l.title} <span class="text-muted text-sm" style="font-size:0.85rem">(${l.type})</span>
                                             </span>
-                                            <button class="btn btn-danger" style="padding:0.4rem 0.8rem;" onclick="AdminActions.deleteLesson('${c.id}', '${l.id}')" title="حذف المحتوى"><i class="fa-solid fa-times"></i></button>
+                                            <div class="flex gap-2">
+                                                <button class="btn btn-outline" style="padding:0.4rem 0.8rem; font-size:0.8rem;" onclick="AdminActions.editLesson('${c.id}', '${l.id}')" title="تعديل"><i class="fa-solid fa-pen"></i></button>
+                                                <button class="btn btn-danger" style="padding:0.4rem 0.8rem; font-size:0.8rem;" onclick="AdminActions.deleteLesson('${c.id}', '${l.id}')" title="حذف المحتوى"><i class="fa-solid fa-times"></i></button>
+                                            </div>
                                         </li>
                                     `).join('')}
                                 </ul>
@@ -2090,30 +2536,44 @@ Views.admin = () => {
                 ` : ''}
 
                 ${window.adminTab === 'settings' ? `
-                    <div class="grid grid-2 gap-6">
+                    <div class="grid grid-3 gap-6">
                         <div class="card p-6" style="max-width:100%;">
-                            <h3 class="mb-4">إعدادات المنصة وطرق الدفع</h3>
+                            <h3 class="mb-4 text-accent"><i class="fa-solid fa-wallet"></i> إعدادات التواصل والدفع</h3>
                             <div class="form-group">
-                                <label class="form-label">رقم الهاتف لاستقبال الدفع (المحفظة)</label>
+                                <label class="form-label">رقم محفظة فودافون كاش</label>
                                 <input type="text" id="walletNumInput" class="form-control" value="${Database.get(DB_KEYS.SETTINGS).walletNumber || ''}" placeholder="01000000000">
                             </div>
                             <div class="form-group">
-                                <label class="form-label">رقم الواتساب للتواصل (بدون +)</label>
+                                <label class="form-label">رقم الواتساب للتواصل</label>
                                 <input type="text" id="waInput" class="form-control" value="${Database.get(DB_KEYS.SETTINGS).whatsappNum || ''}" placeholder="201000000000">
                             </div>
                             <div class="form-group">
-                                <label class="form-label">رابط أو معرف التليجرام</label>
+                                <label class="form-label">معرف التليجرام</label>
                                 <input type="text" id="tgInput" class="form-control" value="${Database.get(DB_KEYS.SETTINGS).telegramLink || ''}" placeholder="menasah">
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">رابط صفحة الفيسبوك</label>
-                                <input type="text" id="fbInput" class="form-control" value="${Database.get(DB_KEYS.SETTINGS).facebookLink || ''}" placeholder="facebook.com/menasah">
                             </div>
                             <button class="btn btn-primary w-100" style="width:100%" onclick="AdminActions.saveSettings()"><i class="fa-solid fa-save"></i> حفظ التغييرات</button>
                         </div>
+
+                        <div class="card p-6" style="max-width:100%;">
+                            <h3 class="mb-4 text-accent"><i class="fa-solid fa-envelope-circle-check"></i> إعدادات بريد التفعيل (OTP)</h3>
+                            <p class="text-muted mb-4" style="font-size:0.8rem;">البريد المستخدم لإرسال الأكواد للطلاب.</p>
+                            
+                            <div id="email_settings_loading" class="text-center p-4"><i class="fa-solid fa-spinner fa-spin"></i> جاري التحميل...</div>
+                            <div id="email_settings_form" style="display:none;">
+                                <div class="form-group">
+                                    <label class="form-label">بريد المعلم (الراسل)</label>
+                                    <input type="email" id="admin_sender_email" class="form-control" placeholder="example@gmail.com">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">كلمة مرور التطبيقات (16 حرف)</label>
+                                    <input type="password" id="admin_sender_pass" class="form-control" placeholder="••••••••••••••••">
+                                </div>
+                                <button id="save_email_btn" class="btn btn-primary w-100" style="width:100%" onclick="window.updateEmailServerSettings()">تحديث إعدادات البريد</button>
+                            </div>
+                        </div>
                         
                         <div class="card p-6" style="max-width:100%;">
-                            <h3 class="mb-4">تحديث بيانات الإدارة</h3>
+                            <h3 class="mb-4 text-accent"><i class="fa-solid fa-user-shield"></i> بيانات الدخول للإدارة</h3>
                             <div class="form-group">
                                 <label class="form-label">البريد الإلكتروني للآدمن</label>
                                 <input type="email" id="adminEmailUpdate" class="form-control" value="${Database.getSession().email}">
@@ -2122,7 +2582,7 @@ Views.admin = () => {
                                 <label class="form-label">كلمة المرور الجديدة</label>
                                 <input type="text" id="adminPassUpdate" class="form-control" placeholder="أدخل الكلمة الجديدة">
                             </div>
-                            <button class="btn btn-warning w-100" style="width:100%" onclick="window.updateAdminAuth()"><i class="fa-solid fa-user-shield"></i> تحديث بيانات الدخول</button>
+                            <button class="btn btn-warning w-100" style="width:100%" onclick="window.updateAdminAuth()">تحديث بيانات الدخول</button>
                         </div>
                     </div>
                 ` : ''}
@@ -2131,6 +2591,62 @@ Views.admin = () => {
     `;
 
     app.root.innerHTML = html;
+
+    // Helper logic for Email Settings in Settings Tab
+    if(window.adminTab === 'settings') {
+        setTimeout(async () => {
+            const form = document.getElementById('email_settings_form');
+            const loading = document.getElementById('email_settings_loading');
+            if(!form || !loading) return;
+            
+            try {
+                const res = await fetch(`${API_BASE_URL}/admin/email-settings`);
+                const data = await res.json();
+                if(data.user) {
+                    document.getElementById('admin_sender_email').value = data.user;
+                    if(data.pass === '********') {
+                        document.getElementById('admin_sender_pass').placeholder = 'كلمة المرور محفوظة (أدخل واحدة جديدة للتغيير)';
+                    }
+                }
+                loading.style.display = 'none';
+                form.style.display = 'block';
+            } catch (e) {
+                if(loading) loading.innerHTML = '<span class="text-danger">تعذر الاتصال بالسيرفر</span>';
+            }
+        }, 100);
+
+        window.updateEmailServerSettings = async () => {
+            const user = document.getElementById('admin_sender_email').value.trim();
+            const pass = document.getElementById('admin_sender_pass').value.trim();
+            const btn = document.getElementById('save_email_btn');
+            
+            if(!user) return UI.showToast('البريد الإلكتروني مطلوب', 'error');
+
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> جاري الحفظ...';
+            btn.disabled = true;
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/admin/email-settings`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user, pass: pass || undefined })
+                });
+                const result = await response.json();
+                if(result.success) {
+                    UI.showToast('تم تحديث إعدادات البريد بنجاح!');
+                    if(pass) document.getElementById('admin_sender_pass').value = '';
+                } else {
+                    UI.showToast(result.error || 'فشل التحديث', 'error');
+                }
+            } catch (e) {
+                UI.showToast('تعذر الاتصال بالسيرفر', 'error');
+            } finally {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+            }
+        };
+    }
 
     window.updateAdminAuth = () => {
         let e = document.getElementById('adminEmailUpdate').value;
