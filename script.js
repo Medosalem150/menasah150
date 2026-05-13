@@ -13,7 +13,10 @@ const DB_KEYS = {
     BOOKS: 'app_books'
 };
 
-const API_BASE_URL = 'https://medosalem150.github.io/menasah150/';
+// API Configuration (Dynamic for local and production)
+const API_BASE_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    ? 'http://localhost:3000/api'
+    : '/api'; // On Vercel, the /api path is proxied to the backend
 
 const DEFAULT_ADMIN = { email: 'admin@edu.com', password: 'admin', role: 'admin' };
 

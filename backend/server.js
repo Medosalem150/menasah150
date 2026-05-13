@@ -4,23 +4,35 @@ const cors = require('cors');
 const nodemailer = require('nodemailer');
 const fs = require('fs');
 const path = require('path');
-
-const SETTINGS_PATH = path.join(__dirname, 'settings.json');
+const { createClient } = require('@vercel/kv');
 
 const app = express();
+
+// Initialize Vercel KV if available (for production)
+let kv;
+if (process.env.KV_REST_API_URL) {
+    kv = createClient({
+        url: process.env.KV_REST_API_URL,
+        token: process.env.KV_REST_API_TOKEN,
+    });
+}
+
 app.use(cors());
 app.use(express.json());
 
-// Function to get current email settings
-function getEmailSettings() {
-    if (fs.existsSync(SETTINGS_PATH)) {
-        try {
-            return JSON.parse(fs.readFileSync(SETTINGS_PATH));
-        } catch (e) {
-            console.error("Error reading settings.json", e);
-        }
+// Helper to get email settings (from KV in production, settings.json in local)
+async function getEmailSettings() {
+    // If on Vercel and KV is connected
+    if (kv) {
+        const settings = await kv.get('email_settings');
+        if (settings) return settings;
     }
-    // Fallback to .env if settings.json doesn't exist
+
+    // Fallback to local file or .env
+    const settingsPath = path.join(__dirname, 'settings.json');
+    if (fs.existsSync(settingsPath)) {
+        return JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    }
     return {
         user: process.env.GMAIL_USER,
         pass: process.env.GMAIL_PASS
@@ -28,39 +40,26 @@ function getEmailSettings() {
 }
 
 // Function to create transporter with current settings
-function createTransporter() {
-    const settings = getEmailSettings();
-    // Trim spaces to avoid EAUTH errors
+function createTransporter(settings) {
     const user = settings.user ? settings.user.trim() : '';
     const pass = settings.pass ? settings.pass.trim() : '';
     
     return nodemailer.createTransport({
         host: 'smtp.gmail.com',
         port: 465,
-        secure: true, // Use SSL
+        secure: true,
         auth: {
             user: user,
             pass: pass
         },
         tls: {
-            rejectUnauthorized: false // Helps in some hosting environments
+            rejectUnauthorized: false
         }
     });
 }
 
-let transporter = createTransporter();
-
-// Verify connection configuration
-transporter.verify(function(error, success) {
-    if (error) {
-        console.log("Transporter error (check your email settings):", error.message);
-    } else {
-        console.log("Server is ready to send emails!");
-    }
-});
-
-// In-memory store for OTPs (For production, consider Redis or Database)
-const otpStore = {};
+// In-memory store for OTPs
+const otpStore = new Map();
 
 app.post('/api/send-otp', async (req, res) => {
     const { email } = req.body;
@@ -69,21 +68,16 @@ app.post('/api/send-otp', async (req, res) => {
         return res.status(400).json({ success: false, error: 'البريد الإلكتروني مطلوب' });
     }
 
-    // Generate a 6-digit OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    otpStore[email] = otp;
+    otpStore.set(email, { otp, expires: Date.now() + 600000 });
 
-    // Re-create transporter to ensure we use latest settings
-    transporter = createTransporter();
-    const settings = getEmailSettings();
+    const settings = await getEmailSettings();
+    const transporter = createTransporter(settings);
     const user = settings.user ? settings.user.trim() : '';
-    const pass = settings.pass ? settings.pass.trim() : '';
-
-    console.log(`[Attempting to send OTP] Using Email: ${user} | Pass starts with: ${pass.substring(0, 3)}...`);
 
     try {
         const mailOptions = {
-            from: `"منصة محمد عبدالسلام" <${settings.user}>`, 
+            from: `"منصة محمد عبدالسلام" <${user}>`, 
             to: email,
             subject: 'كود التفعيل الخاص بك - منصة محمد عبدالسلام',
             html: `
@@ -99,8 +93,6 @@ app.post('/api/send-otp', async (req, res) => {
         };
 
         await transporter.sendMail(mailOptions);
-
-        console.log(`[OTP Sent] From: ${settings.user}, To: ${email}, OTP: ${otp}`);
         res.json({ success: true, message: 'تم إرسال كود التفعيل بنجاح' });
     } catch (error) {
         console.error('Email Sending Error:', error);
@@ -108,31 +100,33 @@ app.post('/api/send-otp', async (req, res) => {
     }
 });
 
-// API to get current email settings (For Admin Panel)
-app.get('/api/admin/email-settings', (req, res) => {
-    const settings = getEmailSettings();
-    // Don't send the real password for security, just masks
+// Admin Endpoints for Email Settings
+app.get('/api/admin/email-settings', async (req, res) => {
+    const settings = await getEmailSettings();
     res.json({ 
-        user: settings.user,
+        user: settings.user || '',
         pass: settings.pass ? '********' : ''
     });
 });
 
-// API to update email settings
-app.post('/api/admin/email-settings', (req, res) => {
+app.post('/api/admin/email-settings', async (req, res) => {
     const { user, pass } = req.body;
     
-    if (!user || !pass) {
-        return res.status(400).json({ success: false, error: 'البريد وكلمة المرور مطلوبان' });
+    if (!user) {
+        return res.status(400).json({ success: false, error: 'البريد مطلوب' });
     }
 
-    const newSettings = { user, pass };
+    let settings = await getEmailSettings();
+    settings.user = user;
+    if (pass) settings.pass = pass;
     
     try {
-        fs.writeFileSync(SETTINGS_PATH, JSON.stringify(newSettings, null, 2));
-        // Refresh transporter with new settings
-        transporter = createTransporter();
-        console.log(`[Settings Updated] New Admin Email: ${user}`);
+        if (kv) {
+            await kv.set('email_settings', settings);
+        } else {
+            const settingsPath = path.join(__dirname, 'settings.json');
+            fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+        }
         res.json({ success: true, message: 'تم تحديث إعدادات البريد بنجاح' });
     } catch (error) {
         console.error('Error saving settings:', error);
@@ -143,21 +137,14 @@ app.post('/api/admin/email-settings', (req, res) => {
 app.post('/api/verify-otp', (req, res) => {
     const { email, otp } = req.body;
     
-    if (!email || !otp) {
-        return res.status(400).json({ success: false, error: 'البيانات غير مكتملة' });
-    }
-
-    if (otpStore[email] === otp) {
-        // OTP verified successfully
-        delete otpStore[email]; // clear the OTP so it can't be reused
+    const store = otpStore.get(email);
+    if (store && store.otp === otp && Date.now() < store.expires) {
+        otpStore.delete(email);
         res.json({ success: true, message: 'تم التحقق بنجاح' });
     } else {
-        // Invalid OTP
-        res.status(400).json({ success: false, error: 'الكود غير صحيح' });
+        res.status(400).json({ success: false, error: 'الكود غير صحيح أو منتهي الصلاحية' });
     }
 });
-
-const PORT = process.env.PORT || 3000;
 
 const https = require('https');
 
@@ -165,7 +152,6 @@ app.get('/api/proxy-pdf', (req, res) => {
     let url = req.query.url;
     if (!url) return res.status(400).send('URL is required');
     
-    // Extract ID from Drive URL
     let fileId = '';
     if (url.includes('/d/')) fileId = url.split('/d/')[1].split('/')[0];
     else if (url.includes('id=')) fileId = url.split('id=')[1].split('&')[0];
@@ -175,7 +161,6 @@ app.get('/api/proxy-pdf', (req, res) => {
     let downloadUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
 
     https.get(downloadUrl, (response) => {
-        // Handle Drive redirect
         if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
             https.get(response.headers.location, (redirectRes) => {
                 res.setHeader('Content-Type', 'application/pdf');
@@ -192,6 +177,13 @@ app.get('/api/proxy-pdf', (req, res) => {
     });
 });
 
-app.listen(PORT, () => {
-    console.log(`Backend server is running on http://localhost:${PORT}`);
-});
+// Start Server ONLY if not running as a Vercel Function
+if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+    const PORT = process.env.PORT || 3000;
+    app.listen(PORT, () => {
+        console.log(`Backend server is running on http://localhost:${PORT}`);
+    });
+}
+
+// Export for Vercel
+module.exports = app;
