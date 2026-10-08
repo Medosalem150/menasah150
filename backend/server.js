@@ -51,10 +51,7 @@ async function getAllData() {
     return {};
 }
 
-// Queue to serialize local file writes and prevent race conditions
-let writeQueue = Promise.resolve();
-
-// Helper to set a specific database key
+// Helper to set a specific database key with immediate KV persistence
 async function setDataKey(key, value) {
     if (kv) {
         try {
@@ -65,33 +62,26 @@ async function setDataKey(key, value) {
         }
     }
 
-    // Local fallback with serialization
-    return new Promise((resolve) => {
-        writeQueue = writeQueue.then(async () => {
-            let currentData = {};
-            if (fs.existsSync(localDbPath)) {
-                try {
-                    currentData = JSON.parse(fs.readFileSync(localDbPath, 'utf8'));
-                } catch (err) {
-                    console.error('Failed to read local DB file for write:', err);
-                }
-            }
-            currentData[key] = value;
-            try {
-                fs.writeFileSync(localDbPath, JSON.stringify(currentData, null, 2), 'utf8');
-                resolve(true);
-            } catch (err) {
-                console.error('Failed to write local DB file:', err);
-                resolve(false);
-            }
-        });
-    });
+    // Local fallback
+    try {
+        let currentData = {};
+        if (fs.existsSync(localDbPath)) {
+            currentData = JSON.parse(fs.readFileSync(localDbPath, 'utf8'));
+        }
+        currentData[key] = value;
+        fs.writeFileSync(localDbPath, JSON.stringify(currentData, null, 2), 'utf8');
+        return true;
+    } catch (err) {
+        console.error('Failed to write local DB file:', err);
+        return false;
+    }
 }
 
 // DB API Endpoints
 app.get('/api/db', async (req, res) => {
     try {
         const data = await getAllData();
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
         res.json({ success: true, data });
     } catch (error) {
         console.error('Error in GET /api/db:', error);
@@ -120,15 +110,13 @@ app.post('/api/db/:key', async (req, res) => {
     }
 });
 
-// Helper to get email settings (from KV in production, settings.json in local)
+// Helper to get email settings
 async function getEmailSettings() {
-    // If on Vercel and KV is connected
     if (kv) {
         const settings = await kv.get('email_settings');
         if (settings) return settings;
     }
 
-    // Fallback to local file or .env
     const settingsPath = path.join(__dirname, 'settings.json');
     if (fs.existsSync(settingsPath)) {
         return JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
@@ -158,9 +146,7 @@ function createTransporter(settings) {
     });
 }
 
-// In-memory store for OTPs
-const otpStore = new Map();
-
+// Helper for persistent OTP store using KV if available, fallback to Map
 app.post('/api/send-otp', async (req, res) => {
     const { email } = req.body;
     
@@ -169,7 +155,11 @@ app.post('/api/send-otp', async (req, res) => {
     }
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    otpStore.set(email, { otp, expires: Date.now() + 600000 });
+    const otpData = { otp, expires: Date.now() + 600000 };
+
+    if (kv) {
+        await kv.set(`otp_${email}`, otpData);
+    }
 
     const settings = await getEmailSettings();
     const transporter = createTransporter(settings);
@@ -197,6 +187,22 @@ app.post('/api/send-otp', async (req, res) => {
     } catch (error) {
         console.error('Email Sending Error:', error);
         res.status(500).json({ success: false, error: 'حدث خطأ أثناء إرسال البريد. يرجى مراجعة إعدادات البريد في لوحة التحكم.' });
+    }
+});
+
+app.post('/api/verify-otp', async (req, res) => {
+    const { email, otp } = req.body;
+    
+    let store = null;
+    if (kv) {
+        store = await kv.get(`otp_${email}`);
+    }
+
+    if (store && store.otp === otp && Date.now() < store.expires) {
+        if (kv) await kv.del(`otp_${email}`);
+        res.json({ success: true, message: 'تم التحقق بنجاح' });
+    } else {
+        res.status(400).json({ success: false, error: 'الكود غير صحيح أو منتهي الصلاحية' });
     }
 });
 
@@ -234,18 +240,6 @@ app.post('/api/admin/email-settings', async (req, res) => {
     }
 });
 
-app.post('/api/verify-otp', (req, res) => {
-    const { email, otp } = req.body;
-    
-    const store = otpStore.get(email);
-    if (store && store.otp === otp && Date.now() < store.expires) {
-        otpStore.delete(email);
-        res.json({ success: true, message: 'تم التحقق بنجاح' });
-    } else {
-        res.status(400).json({ success: false, error: 'الكود غير صحيح أو منتهي الصلاحية' });
-    }
-});
-
 const https = require('https');
 
 app.get('/api/proxy-pdf', (req, res) => {
@@ -268,7 +262,7 @@ app.get('/api/proxy-pdf', (req, res) => {
                 redirectRes.pipe(res);
             }).on('error', () => res.status(500).send('Proxy error'));
         } else {
-            res.setHeader('Content-Type', 'application/pdf');
+            res.Header('Content-Type', 'application/pdf');
             res.setHeader('Content-Disposition', 'inline; filename="document.pdf"');
             response.pipe(res);
         }
