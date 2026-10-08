@@ -193,8 +193,9 @@ class Database {
         return { success: true, msg: 'تم شراء المذكرة بنجاح!' };
     }
 
-    // Wallet & Payments
-    static activateWalletCode(email, codeStr) {
+   // Wallet & Payments (Updated for Real-Time Multi-Device Sync)
+    static async activateWalletCode(email, codeStr) {
+        await this.syncFromServer();
         let codes = this.get(DB_KEYS.CODES);
         let idx = codes.findIndex(c => c.code === codeStr && !c.usedBy);
         if (idx === -1) return { success: false, msg: 'كود غير صالح أو مستخدم مسبقاً' };
@@ -210,14 +211,15 @@ class Database {
         this.set(DB_KEYS.USERS, users);
         
         let session = this.getSession();
-        if(session.email === email) { 
+        if(session && session.email === email) { 
             session.walletBalance = users[uIdx].walletBalance; 
             localStorage.setItem(DB_KEYS.SESSION, JSON.stringify(session)); 
         }
         return { success: true, msg: `تم شحن محفظتك بقيمة ${value} ج.م بنجاح` };
     }
 
-    static requestWalletRecharge(email, amount, receiptBase64) {
+    static async requestWalletRecharge(email, amount, receiptBase64) {
+        await this.syncFromServer();
         let reqs = this.get(DB_KEYS.PAYMENTS);
         reqs.push({
             id: 'req_' + Date.now(),
@@ -231,7 +233,8 @@ class Database {
         return { success: true, msg: 'تم إرسال طلب شحن المحفظة، يرجى الانتظار لمراجعته من الإدارة' };
     }
     
-    static approveRequest(reqId) {
+    static async approveRequest(reqId) {
+        await this.syncFromServer();
         let reqs = this.get(DB_KEYS.PAYMENTS);
         let req = reqs.find(r => r.id === reqId);
         if(req && req.status === 'pending') {
@@ -249,9 +252,10 @@ class Database {
         return false;
     }
     
-    static rejectRequest(reqId) {
+    static async rejectRequest(reqId) {
+        await this.syncFromServer();
         let reqs = this.get(DB_KEYS.PAYMENTS);
-        let req = reqs.find(r => r.id === reqId);
+        let req = reqs.find(r => req.id === reqId);
         if(req && req.status === 'pending') {
             req.status = 'rejected';
             this.set(DB_KEYS.PAYMENTS, reqs);
@@ -259,7 +263,6 @@ class Database {
         }
         return false;
     }
-
     // Buying logic
     static buyCourse(courseId, price) {
         let user = this.getSession();
