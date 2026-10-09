@@ -65,15 +65,19 @@ class Database {
 
     static get(key) { return JSON.parse(localStorage.getItem(key)) || []; }
     
-    static set(key, data) { 
+    static async set(key, data) { 
         localStorage.setItem(key, JSON.stringify(data)); 
-        // Sync to server in the background (except user session)
+        // Sync to server reliably
         if (key !== DB_KEYS.SESSION) {
-            fetch(`${API_BASE_URL}/db/${key}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data)
-            }).catch(err => console.error(`Failed to sync ${key} to server:`, err));
+            try {
+                await fetch(`${API_BASE_URL}/db/${key}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+            } catch (err) {
+                console.error(`Failed to sync ${key} to server:`, err);
+            }
         }
     }
 
@@ -142,42 +146,42 @@ class Database {
         }
         return user;
     }
-    static updateSession(user) {
+    static async updateSession(user) {
         if(user.role !== 'admin') {
             let users = this.get(DB_KEYS.USERS);
             let uIdx = users.findIndex(u => u.email === user.email);
             if(uIdx !== -1) {
                 users[uIdx] = user;
-                this.set(DB_KEYS.USERS, users);
+                await this.set(DB_KEYS.USERS, users);
             }
         }
         localStorage.setItem(DB_KEYS.SESSION, JSON.stringify(user));
     }
-    static registerChild(name, phone, email, password, grade = '1') {
+    static async registerChild(name, phone, email, password, grade = '1') {
         let users = this.get(DB_KEYS.USERS);
-        if (users.find(u => u.email === email)) return false; // Exists
+        if (users.find(u => u.email === email)) return false; 
         users.push({ name, phone, email, password, role: 'student', grade: grade, enrolled: [], enrolledLessons: [], walletBalance: 0 });
-        this.set(DB_KEYS.USERS, users);
+        await this.set(DB_KEYS.USERS, users);
         return true;
     }
 
-    static registerParent(name, phone, email, password, childEmail) {
+    static async registerParent(name, phone, email, password, childEmail) {
         let users = this.get(DB_KEYS.USERS);
-        if (users.find(u => u.email === email)) return false; // Exists
+        if (users.find(u => u.email === email)) return false; 
         
-        // Final check for child existence
         let child = users.find(u => u.email === childEmail && u.role === 'student');
         if (!child) return false;
 
         users.push({ name, phone, email, password, role: 'parent', childEmail: childEmail });
-        this.set(DB_KEYS.USERS, users);
+        await this.set(DB_KEYS.USERS, users);
         return true;
     }
 
-    static buyBook(bookId, price) {
+    static async buyBook(bookId, price) {
         let user = this.getSession();
         if(!user || user.role === 'admin' || user.role === 'parent') return { success: false, msg: 'الطالب فقط يمكنه الشراء' };
         
+        await this.syncFromServer();
         if(user.walletBalance < price) {
             return { success: false, msg: 'رصيد المحفظة غير كافٍ. يرجى الشحن أولاً.' };
         }
@@ -189,35 +193,39 @@ class Database {
         if(typeof user.totalSpent === 'undefined') user.totalSpent = 0;
         user.totalSpent += parseFloat(price);
 
-        this.updateSession(user);
+        await this.updateSession(user);
         return { success: true, msg: 'تم شراء المذكرة بنجاح!' };
     }
 
-    // Wallet & Payments
-    static activateWalletCode(email, codeStr) {
+    // Wallet & Payments (Updated with async/await server sync)
+    static async activateWalletCode(email, codeStr) {
+        await this.syncFromServer();
         let codes = this.get(DB_KEYS.CODES);
         let idx = codes.findIndex(c => c.code === codeStr && !c.usedBy);
         if (idx === -1) return { success: false, msg: 'كود غير صالح أو مستخدم مسبقاً' };
         
         let value = codes[idx].value || 0;
         codes[idx].usedBy = email;
-        this.set(DB_KEYS.CODES, codes);
+        await this.set(DB_KEYS.CODES, codes);
 
         let users = this.get(DB_KEYS.USERS);
         let uIdx = users.findIndex(u => u.email === email);
-        if(typeof users[uIdx].walletBalance === 'undefined') users[uIdx].walletBalance = 0;
-        users[uIdx].walletBalance += parseFloat(value);
-        this.set(DB_KEYS.USERS, users);
+        if(uIdx !== -1) {
+            if(typeof users[uIdx].walletBalance === 'undefined') users[uIdx].walletBalance = 0;
+            users[uIdx].walletBalance += parseFloat(value);
+            await this.set(DB_KEYS.USERS, users);
+        }
         
         let session = this.getSession();
-        if(session.email === email) { 
+        if(session && session.email === email && uIdx !== -1) { 
             session.walletBalance = users[uIdx].walletBalance; 
             localStorage.setItem(DB_KEYS.SESSION, JSON.stringify(session)); 
         }
         return { success: true, msg: `تم شحن محفظتك بقيمة ${value} ج.م بنجاح` };
     }
 
-    static requestWalletRecharge(email, amount, receiptBase64) {
+    static async requestWalletRecharge(email, amount, receiptBase64) {
+        await this.syncFromServer();
         let reqs = this.get(DB_KEYS.PAYMENTS);
         reqs.push({
             id: 'req_' + Date.now(),
@@ -227,44 +235,47 @@ class Database {
             status: 'pending',
             date: new Date().toISOString()
         });
-        this.set(DB_KEYS.PAYMENTS, reqs);
+        await this.set(DB_KEYS.PAYMENTS, reqs);
         return { success: true, msg: 'تم إرسال طلب شحن المحفظة، يرجى الانتظار لمراجعته من الإدارة' };
     }
     
-    static approveRequest(reqId) {
+    static async approveRequest(reqId) {
+        await this.syncFromServer();
         let reqs = this.get(DB_KEYS.PAYMENTS);
         let req = reqs.find(r => r.id === reqId);
         if(req && req.status === 'pending') {
             req.status = 'approved';
-            this.set(DB_KEYS.PAYMENTS, reqs);
+            await this.set(DB_KEYS.PAYMENTS, reqs);
             let users = this.get(DB_KEYS.USERS);
             let uIdx = users.findIndex(u => u.email === req.email);
             if(uIdx !== -1) {
                 if(typeof users[uIdx].walletBalance === 'undefined') users[uIdx].walletBalance = 0;
                 users[uIdx].walletBalance += parseFloat(req.amount);
-                this.set(DB_KEYS.USERS, users);
+                await this.set(DB_KEYS.USERS, users);
             }
             return true;
         }
         return false;
     }
     
-    static rejectRequest(reqId) {
+    static async rejectRequest(reqId) {
+        await this.syncFromServer();
         let reqs = this.get(DB_KEYS.PAYMENTS);
         let req = reqs.find(r => r.id === reqId);
         if(req && req.status === 'pending') {
             req.status = 'rejected';
-            this.set(DB_KEYS.PAYMENTS, reqs);
+            await this.set(DB_KEYS.PAYMENTS, reqs);
             return true;
         }
         return false;
     }
 
     // Buying logic
-    static buyCourse(courseId, price) {
+    static async buyCourse(courseId, price) {
         let user = this.getSession();
         if(!user || user.role === 'admin') return { success: false, msg: 'الآدمن لا يمكنه الشراء' };
         
+        await this.syncFromServer();
         if(user.walletBalance < price) {
             return { success: false, msg: 'رصيد المحفظة غير كافٍ. يرجى الشحن أولاً.' };
         }
@@ -276,14 +287,15 @@ class Database {
         if(typeof user.totalSpent === 'undefined') user.totalSpent = 0;
         user.totalSpent += parseFloat(price);
 
-        this.updateSession(user);
+        await this.updateSession(user);
         return { success: true, msg: 'تم شراء الدورة كاملة بنجاح!' };
     }
 
-    static buyLesson(courseId, lessonId, price) {
+    static async buyLesson(courseId, lessonId, price) {
         let user = this.getSession();
         if(!user || user.role === 'admin') return { success: false, msg: 'الآدمن لا يمكنه الشراء' };
         
+        await this.syncFromServer();
         if(user.walletBalance < price) {
             return { success: false, msg: 'رصيد المحفظة غير كافٍ. يرجى الشحن أولاً.' };
         }
@@ -296,7 +308,7 @@ class Database {
         if(typeof user.totalSpent === 'undefined') user.totalSpent = 0;
         user.totalSpent += parseFloat(price);
 
-        this.updateSession(user);
+        await this.updateSession(user);
         return { success: true, msg: 'تم شراء الدرس بنجاح!' };
     }
 
@@ -503,7 +515,7 @@ const app = {
         setTimeout(() => {
             this.loader.classList.add('hidden');
             this.route();
-        }, 500); // Fake load
+        }, 500); 
     },
 
     route(skipSync = false) {
@@ -524,7 +536,7 @@ const app = {
         }
 
         UI.renderNav();
-        this.root.innerHTML = ''; // basic clear
+        this.root.innerHTML = ''; 
         
         if (!session && hash !== '/login' && hash !== '/register') {
             window.location.hash = '/login';
@@ -597,7 +609,6 @@ Views.renderAuthScreen = (activeTab = window.activeAuthForm) => {
     app.root.innerHTML = `
         <div class="auth-hero-page">
             <div class="auth-content-left">
-                <!-- 2 Action Buttons matching uploaded mockup exactly -->
                 <div class="auth-main-btns">
                     <button type="button" class="btn-mockup btn-purple ${activeTab === 'register' ? 'active' : ''}" onclick="window.toggleAuthForm('register')">
                         <i class="fa-solid fa-user-plus"></i>
@@ -609,7 +620,6 @@ Views.renderAuthScreen = (activeTab = window.activeAuthForm) => {
                     </button>
                 </div>
 
-                <!-- Expanded Form Container when a button is clicked -->
                 ${activeTab ? `
                     <div id="auth-form-container" class="auth-form-card">
                         ${activeTab === 'login' ? `
@@ -757,17 +767,17 @@ Views.renderAuthScreen = (activeTab = window.activeAuthForm) => {
             if (otpRes.success) {
                 submitBtn.innerHTML = originalText;
                 submitBtn.disabled = false;
-                VerificationService.showOTPModal(email, () => {
-                    let res;
+                VerificationService.showOTPModal(email, async () => {
+                    let regRes;
                     if (window.regType === 'parent') {
                         const childEmail = document.getElementById('r_child').value.trim();
-                        res = Database.registerParent(name, phone, email, pass, childEmail);
+                        regRes = await Database.registerParent(name, phone, email, pass, childEmail);
                     } else {
                         const grade = document.getElementById('r_grade') ? document.getElementById('r_grade').value : '1';
-                        res = Database.registerChild(name, phone, email, pass, grade);
+                        regRes = await Database.registerChild(name, phone, email, pass, grade);
                     }
 
-                    if (res) {
+                    if (regRes) {
                         UI.showToast('تم إنشاء الحساب وتفعيله بنجاح! يمكنك الآن تسجيل الدخول');
                         window.toggleAuthForm('login');
                     } else {
@@ -960,24 +970,24 @@ Views.courseDetail = (id) => {
 
     app.root.innerHTML = html;
 
-    window.buyFullCourse = (cid, price) => {
+    window.buyFullCourse = async (cid, price) => {
         if(confirm(`هل أنت متأكد من شراء الدورة كاملة بمبلغ ${price} ج.م ؟\nسيتم خصم المبلغ مباشرة من محفظتك.`)) {
-            let res = Database.buyCourse(cid, price);
+            let res = await Database.buyCourse(cid, price);
             if(res.success) {
                 UI.showToast(res.msg);
-                app.route(); // refresh
+                app.route(); 
             } else {
                 UI.showToast(res.msg, 'error');
             }
         }
     };
     
-    window.buySingleLesson = (cid, lid, price) => {
+    window.buySingleLesson = async (cid, lid, price) => {
         if(confirm(`هل أنت متأكد من شراء هذا الدرس بمبلغ ${price} ج.م ؟\nسيتم خصم المبلغ من محفظتك.`)) {
-            let res = Database.buyLesson(cid, lid, price);
+            let res = await Database.buyLesson(cid, lid, price);
             if(res.success) {
                 UI.showToast(res.msg);
-                app.route(); // refresh
+                app.route(); 
             } else {
                 UI.showToast(res.msg, 'error');
             }
@@ -1001,7 +1011,6 @@ Views.wallet = () => {
 
             <h3 class="mb-6 flex items-center gap-2"><i class="fa-solid fa-plus-circle text-accent"></i> طرق شحن المحفظة المختلفة</h3>
             <div class="grid grid-2 gap-6">
-                <!-- Option 1 -->
                 <div class="card p-6 relative overflow-hidden" style="border-top: 4px solid #fcd34d">
                     <h4 class="mb-4"><i class="fa-solid fa-key" style="color:#fcd34d"></i> الشحن بكود التفعيل</h4>
                     <p class="text-muted mb-6">احصل على كود شحن من السنتر أو المكاتب المعتمدة والمكتبات.</p>
@@ -1011,7 +1020,6 @@ Views.wallet = () => {
                     </div>
                 </div>
                 
-                <!-- Option 2 -->
                 <div class="card p-6 relative" style="border-top: 4px solid #60a5fa">
                     <h4 class="mb-4"><i class="fa-solid fa-mobile-screen" style="color:#60a5fa"></i> الشحن من المحافظ الإلكترونية</h4>
                     <p class="text-muted mb-4">قم بتحويل المبلغ المطلوب للشحن للرقم: <br>
@@ -1032,13 +1040,13 @@ Views.wallet = () => {
     `;
     app.root.innerHTML = html;
 
-    window.rechargeByCode = () => {
+    window.rechargeByCode = async () => {
         let code = document.getElementById('walletCode').value;
         if(!code) return UI.showToast('الرجاء إدخال الكود', 'error');
-        let res = Database.activateWalletCode(session.email, code);
+        let res = await Database.activateWalletCode(session.email, code);
         if(res.success) {
             UI.showToast(res.msg);
-            app.route(); // refresh
+            app.route(); 
         } else {
             UI.showToast(res.msg, 'error');
         }
@@ -1057,12 +1065,12 @@ Views.wallet = () => {
         }
     };
     
-    window.submitWalletReq = () => {
+    window.submitWalletReq = async () => {
         let amount = document.getElementById('rechargeAmount').value;
         if(!amount || amount <= 0) return UI.showToast('يجب إدخال مبلغ صحيح', 'error');
         if(!uploadedBase64) return UI.showToast('يجب رفع صورة الإيصال أولاً', 'error');
         
-        let res = Database.requestWalletRecharge(session.email, amount, uploadedBase64);
+        let res = await Database.requestWalletRecharge(session.email, amount, uploadedBase64);
         UI.showToast(res.msg);
         app.route();
     };
@@ -1105,9 +1113,6 @@ Views.lesson = (courseId, lessonId) => {
     }
 
     let contentHtml = '';
-
-    // PROTECTIONS:
-    // Right click disable, Context menu disable
     let protectHTML = `oncontextmenu="return false;" ondragstart="return false;" onselectstart="return false;"`;
 
     if (lesson.type === 'video') {
@@ -1149,7 +1154,6 @@ Views.lesson = (courseId, lessonId) => {
                 <div class="watermark" style="pointer-events:none; z-index:10;">${Database.getSession().email}</div>
                 
                 ${isDrive ? `
-                    <!-- Blocking overlay for Google Drive UI buttons -->
                     <div class="drive-ui-blocker" style="position:absolute; top:0; right:0; width:150px; height:60px; z-index:20; cursor:not-allowed;" title="أدوات التحميل معطلة للحماية"></div>
                 ` : ''}
                 
@@ -1195,7 +1199,7 @@ Views.lesson = (courseId, lessonId) => {
             }
         };
 
-        window.submitExam = () => {
+        window.submitExam = async () => {
             let score = 0;
             window.examState.questions.forEach((q, i) => {
                 if (window.examState.answers[i] === q.answer) score++;
@@ -1211,7 +1215,6 @@ Views.lesson = (courseId, lessonId) => {
                 user.examResults = user.examResults.filter(e => !(e.courseId === courseId && e.lessonId === lessonId));
                 user.examResults.push({ courseId, lessonId, score, total: window.examState.questions.length, perc: scorePerc });
                 
-                // Check for reward
                 if (isPerfect && lesson.reward > 0) {
                     if (!user.claimedRewards) user.claimedRewards = [];
                     if (!user.claimedRewards.includes(lessonId)) {
@@ -1224,7 +1227,7 @@ Views.lesson = (courseId, lessonId) => {
                         UI.showToast(`مبروك! تمت إضافة ${lesson.reward} ج.م لمحفظتك`, 'success');
                     }
                 }
-                Database.updateSession(user);
+                await Database.updateSession(user);
             }
 
             let resultHtml = `
@@ -1342,7 +1345,6 @@ Views.lesson = (courseId, lessonId) => {
                 .justify-center { justify-content: center; }
             </style>
             <div class="exam-container" id="exam-wrapper" style="box-shadow:var(--shadow-lg); border:none; background:var(--clr-surface); padding:3rem; border-radius:var(--radius-xl); max-width:800px; margin:0 auto;">
-                <!-- Exam content will be rendered here -->
             </div>
         `;
 
@@ -1371,8 +1373,6 @@ Views.lesson = (courseId, lessonId) => {
     `;
     
     app.root.innerHTML = html;
-
-    // Extra runtime protection
     document.addEventListener('contextmenu', event => event.preventDefault());
 };
 
@@ -1616,9 +1616,9 @@ Views.books = () => {
     
     app.root.innerHTML = html;
 
-    window.buyBook = (bId, price) => {
+    window.buyBook = async (bId, price) => {
         if(confirm(`هل أنت متأكد من شراء هذه المذكرة بسعر ${price} ج.م؟ سيتم الخصم من محفظتك.`)) {
-            let res = Database.buyBook(bId, price);
+            let res = await Database.buyBook(bId, price);
             if(res.success) {
                 UI.showToast(res.msg);
                 app.route();
@@ -1638,7 +1638,6 @@ Views.bookViewer = (bookId) => {
         return;
     }
 
-    // Check if purchased
     let isPurchased = session && session.purchasedBooks && session.purchasedBooks.includes(bookId);
     let isAdmin = session && session.role === 'admin';
     
@@ -1650,11 +1649,8 @@ Views.bookViewer = (bookId) => {
 
     let pdfUrl = book.link;
     if(pdfUrl.includes('drive.google.com')) {
-        // Convert drive link to preview link if needed
         if(pdfUrl.includes('/view')) {
             pdfUrl = pdfUrl.replace('/view', '/preview');
-        } else if(!pdfUrl.includes('/preview')) {
-            // handle other drive formats if possible
         }
     }
 
@@ -1669,10 +1665,7 @@ Views.bookViewer = (bookId) => {
             
             <div class="protected-content-wrapper" style="height:85vh; border-radius:var(--radius-xl); overflow:hidden; position:relative; box-shadow:var(--shadow-lg); border: 2px solid var(--clr-border);" ${protectHTML}>
                 <div class="watermark" style="pointer-events:none; z-index:10;">${session.email}</div>
-                
-                <!-- Blocking overlay for Google Drive UI buttons (Pop-out, Print, Download) -->
                 <div class="drive-ui-blocker" style="position:absolute; top:0; right:0; width:150px; height:60px; z-index:20; cursor:not-allowed;" title="أدوات التحميل معطلة للحماية"></div>
-                
                 <div class="protection-overlay" style="position:absolute; top:0; left:0; width:100%; height:100%; z-index:5; pointer-events:none;"></div>
                 <iframe src="${pdfUrl}" width="100%" height="100%" frameborder="0" style="background:var(--clr-bg);"></iframe>
             </div>
@@ -1735,21 +1728,18 @@ Views.contact = () => {
             <p class="text-muted mb-8" style="font-size:1.2rem;">نحن هنا دائماً لمساعدتك. يمكنك التواصل معنا عبر أي من القنوات التالية:</p>
             
             <div class="grid grid-3 gap-6">
-                <!-- WhatsApp -->
                 <div class="card p-6" style="border-top: 4px solid #25D366; transition: transform 0.3s; cursor: pointer;" onmouseover="this.style.transform='translateY(-10px)'" onmouseout="this.style.transform='translateY(0)'" onclick="if('${waLink}' !== '#') window.open('${waLink}', '_blank'); else alert('لم يتم إعداد رقم الواتساب بعد، يرجى مراجعة الإدارة.');">
                     <i class="fa-brands fa-whatsapp mb-4" style="font-size: 4rem; color: #25D366;"></i>
                     <h3>واتساب</h3>
                     <p class="text-muted">تواصل معنا عبر رسائل الواتساب للحصول على دعم سريع.</p>
                 </div>
                 
-                <!-- Telegram -->
                 <div class="card p-6" style="border-top: 4px solid #0088cc; transition: transform 0.3s; cursor: pointer;" onmouseover="this.style.transform='translateY(-10px)'" onmouseout="this.style.transform='translateY(0)'" onclick="if('${tgLink}' !== '#') window.open('${tgLink}', '_blank'); else alert('لم يتم إعداد التليجرام بعد، يرجى مراجعة الإدارة.');">
                     <i class="fa-brands fa-telegram mb-4" style="font-size: 4rem; color: #0088cc;"></i>
                     <h3>تليجرام</h3>
                     <p class="text-muted">انضم لقناتنا أو راسل الدعم الفني عبر تليجرام.</p>
                 </div>
                 
-                <!-- Facebook -->
                 <div class="card p-6" style="border-top: 4px solid #1877F2; transition: transform 0.3s; cursor: pointer;" onmouseover="this.style.transform='translateY(-10px)'" onmouseout="this.style.transform='translateY(0)'" onclick="if('${fbLink}' !== '#') window.open('${fbLink}', '_blank'); else alert('لم يتم إعداد صفحة الفيسبوك بعد، يرجى مراجعة الإدارة.');">
                     <i class="fa-brands fa-facebook mb-4" style="font-size: 4rem; color: #1877F2;"></i>
                     <h3>فيسبوك</h3>
@@ -1832,7 +1822,7 @@ window.AdminActions = {
         `;
         this.openModal(html);
     },
-    saveBook(mode) {
+    async saveBook(mode) {
         let title = document.getElementById('bTitle').value;
         let desc = document.getElementById('bDesc').value;
         let price = parseFloat(document.getElementById('bPrice').value) || 0;
@@ -1858,14 +1848,14 @@ window.AdminActions = {
             UI.showToast('تم إدراج المذكرة بنجاح');
         }
         
-        Database.set(DB_KEYS.BOOKS, books);
+        await Database.set(DB_KEYS.BOOKS, books);
         this.closeModal();
         app.route();
     },
-    deleteBook(id) {
+    async deleteBook(id) {
         if(!confirm('هل أنت متأكد من حذف هذه المذكرة من المنصة بشكل نهائي؟')) return;
         let books = Database.get(DB_KEYS.BOOKS).filter(b => b.id !== id);
-        Database.set(DB_KEYS.BOOKS, books);
+        await Database.set(DB_KEYS.BOOKS, books);
         UI.showToast('تم الحذف بنجاح');
         app.route();
     },
@@ -2052,13 +2042,13 @@ window.AdminActions = {
             if(dialog) dialog.style.maxWidth = '700px';
         }
     },
-    decideReq(id, action) {
+    async decideReq(id, action) {
         if(!confirm(action === 'approve'? 'هل أنت متأكد من تفعيل الكورس لهذا الطالب؟' : 'هل أنت متأكد من رفض طلب الدفع هذا؟')) return;
         if(action === 'approve') {
-            Database.approveRequest(id);
+            await Database.approveRequest(id);
             UI.showToast('تم تفعيل الكورس للطالب بنجاح');
         } else {
-            Database.rejectRequest(id);
+            await Database.rejectRequest(id);
             UI.showToast('تم رفض الطلب', 'error');
         }
         app.route();
@@ -2092,7 +2082,7 @@ window.AdminActions = {
             btn.disabled = false;
         }
     },
-    saveSettings() {
+    async saveSettings() {
         let w = document.getElementById('walletNumInput').value;
         let wa = document.getElementById('waInput').value;
         let tg = document.getElementById('tgInput').value;
@@ -2104,7 +2094,7 @@ window.AdminActions = {
         s.telegramLink = tg;
         s.facebookLink = fb;
         
-        Database.set(DB_KEYS.SETTINGS, s);
+        await Database.set(DB_KEYS.SETTINGS, s);
         UI.showToast('تم حفظ الإعدادات بنجاح');
         app.route();
     },
@@ -2172,14 +2162,14 @@ window.AdminActions = {
         `;
         this.openModal(html);
     },
-    deleteCourse(cId) {
+    async deleteCourse(cId) {
         if(!confirm('هل أنت متأكد من حذف هذه الدورة بالكامل؟ (لا يمكن التراجع)')) return;
         let c = Database.get(DB_KEYS.COURSES);
         c = c.filter(x => x.id !== cId);
-        Database.set(DB_KEYS.COURSES, c);
+        await Database.set(DB_KEYS.COURSES, c);
         app.route();
     },
-    saveCourse(mode) {
+    async saveCourse(mode) {
         let title = document.getElementById('cTitle').value;
         let desc = document.getElementById('cDesc').value;
         let price = document.getElementById('cPrice').value;
@@ -2204,11 +2194,10 @@ window.AdminActions = {
             });
             UI.showToast('تمت إضافة الدورة بنجاح');
         }
-        Database.set(DB_KEYS.COURSES, courses);
+        await Database.set(DB_KEYS.COURSES, courses);
         this.closeModal();
         app.route();
     },
-    // Lessons & Content
     addLesson(courseId) {
         let html = `
             <div class="modal-header">
@@ -2266,7 +2255,6 @@ window.AdminActions = {
     },
     addQuestionField() {
         let qList = document.getElementById('qList');
-        let index = qList.children.length;
         let html = `
             <div class="card p-4 mt-4" style="background:var(--clr-bg); border-color:var(--clr-border);">
                 <div class="form-group"><label class="form-label text-accent">السؤال</label><input type="text" class="form-control q-text"></div>
@@ -2278,7 +2266,7 @@ window.AdminActions = {
         div.innerHTML = html;
         qList.appendChild(div);
     },
-    saveLesson() {
+    async saveLesson() {
         let courseId = document.getElementById('lCourseId').value;
         let title = document.getElementById('lTitle').value;
         let type = document.getElementById('lType').value;
@@ -2325,29 +2313,27 @@ window.AdminActions = {
             UI.showToast('تم إضافة المحتوى بنجاح');
         }
         
-        Database.set(DB_KEYS.COURSES, courses);
+        await Database.set(DB_KEYS.COURSES, courses);
         this.closeModal();
         app.route();
     },
     editLesson(courseId, lessonId) {
         let course = Database.get(DB_KEYS.COURSES).find(c => c.id === courseId);
         let lesson = course.lessons.find(l => l.id === lessonId);
-        this.addLesson(courseId); // Open the same modal
+        this.addLesson(courseId); 
         
-        // Fill the data
         document.querySelector('.modal-header h3').innerText = 'تعديل المحتوى التعليمي';
         document.getElementById('lTitle').value = lesson.title;
         document.getElementById('lPrice').value = lesson.price;
         document.getElementById('lType').value = lesson.type;
         
-        // Add hidden input for lesson ID
         let hiddenId = document.createElement('input');
         hiddenId.type = 'hidden';
         hiddenId.id = 'lId';
         hiddenId.value = lessonId;
         document.getElementById('lCourseId').after(hiddenId);
         
-        this.toggleLessonInputs(); // Re-trigger to show correct fields
+        this.toggleLessonInputs(); 
         
         if(lesson.type === 'exam') {
             document.getElementById('lReward').value = lesson.reward || 0;
@@ -2364,12 +2350,12 @@ window.AdminActions = {
             document.getElementById('lContent').value = lesson.content;
         }
     },
-    deleteLesson(courseId, lessonId) {
+    async deleteLesson(courseId, lessonId) {
         if(!confirm('هل أنت متأكد من حذف هذا الدرس / الاختبار؟')) return;
         let courses = Database.get(DB_KEYS.COURSES);
         let cIdx = courses.findIndex(c => c.id === courseId);
         courses[cIdx].lessons = courses[cIdx].lessons.filter(l => l.id !== lessonId);
-        Database.set(DB_KEYS.COURSES, courses);
+        await Database.set(DB_KEYS.COURSES, courses);
         app.route();
     }
 };
@@ -2715,7 +2701,7 @@ Views.admin = () => {
         }
     };
 
-    window.generateCodes = () => {
+    window.generateCodes = async () => {
         let val = parseFloat(document.getElementById('genValue').value);
         if(!val || val <= 0) return UI.showToast('يرجى تحديد قيمة صالحة للكود', 'error');
         let count = parseInt(document.getElementById('genCount').value);
@@ -2727,21 +2713,21 @@ Views.admin = () => {
                 usedBy: null
             });
         }
-        Database.set(DB_KEYS.CODES, curr);
+        await Database.set(DB_KEYS.CODES, curr);
         UI.showToast(`تم إضافة ${count} كود شحن بنجاح`);
-        app.route(); // refresh
+        app.route(); 
     };
     
     window.toggleAllCodes = (el) => {
         document.querySelectorAll('.code-cb').forEach(cb => cb.checked = el.checked);
     };
     
-    window.deleteSelectedCodes = () => {
+    window.deleteSelectedCodes = async () => {
         let selected = Array.from(document.querySelectorAll('.code-cb:checked')).map(cb => cb.value);
         if(selected.length === 0) return UI.showToast('لم تقم بتحديد أي كود', 'error');
         if(!confirm(`هل أنت متأكد من حذف ${selected.length} كود؟`)) return;
         let dbCodes = Database.get(DB_KEYS.CODES).filter(c => !selected.includes(c.code));
-        Database.set(DB_KEYS.CODES, dbCodes);
+        await Database.set(DB_KEYS.CODES, dbCodes);
         UI.showToast(`تم حذف ${selected.length} كود بنجاح`);
         app.route();
     };
@@ -2826,29 +2812,29 @@ Views.admin = () => {
         printWindow.focus();
     };
     
-    window.deleteCode = (code) => {
+    window.deleteCode = async (code) => {
         if(!confirm(`هل أنت متأكد من حذف الكود ${code}؟`)) return;
         let dbCodes = Database.get(DB_KEYS.CODES).filter(c => c.code !== code);
-        Database.set(DB_KEYS.CODES, dbCodes);
+        await Database.set(DB_KEYS.CODES, dbCodes);
         UI.showToast(`تم حذف الكود بنجاح`);
         app.route();
     };
 
-    window.toggleUserSuspension = (email) => {
+    window.toggleUserSuspension = async (email) => {
         let users = Database.get(DB_KEYS.USERS);
         let user = users.find(u => u.email === email);
         if(user) {
             user.suspended = !user.suspended;
-            Database.set(DB_KEYS.USERS, users);
+            await Database.set(DB_KEYS.USERS, users);
             UI.showToast(user.suspended ? 'تم تعليق الحساب بنجاح' : 'تم تفعيل الحساب بنجاح');
             app.route();
         }
     };
 
-    window.deleteUser = (email) => {
+    window.deleteUser = async (email) => {
         if(!confirm(`هل أنت متأكد من الحذف النهائي لحساب: ${email}؟`)) return;
         let users = Database.get(DB_KEYS.USERS).filter(u => u.email !== email);
-        Database.set(DB_KEYS.USERS, users);
+        await Database.set(DB_KEYS.USERS, users);
         UI.showToast('تم حذف الحساب نهائياً');
         app.route();
     };
@@ -2857,13 +2843,13 @@ Views.admin = () => {
         document.querySelectorAll('.req-cb').forEach(cb => cb.checked = el.checked);
     };
 
-    window.deleteSelectedRequests = () => {
+    window.deleteSelectedRequests = async () => {
         let selected = Array.from(document.querySelectorAll('.req-cb:checked')).map(cb => cb.value);
         if(selected.length === 0) return UI.showToast('لم تقم بتحديد أي طلب لحذفه', 'error');
         if(!confirm(`هل أنت متأكد من حذف ${selected.length} طلب؟`)) return;
         
         let requests = Database.get(DB_KEYS.PAYMENTS).filter(r => !selected.includes(r.id));
-        Database.set(DB_KEYS.PAYMENTS, requests);
+        await Database.set(DB_KEYS.PAYMENTS, requests);
         UI.showToast(`تم حذف ${selected.length} طلب بنجاح`);
         app.route();
     };
