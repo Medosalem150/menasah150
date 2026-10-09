@@ -1053,17 +1053,45 @@ Views.wallet = () => {
     };
 
     let uploadedBase64 = null;
-    window.uploadReceipt = (input) => {
-        if(input.files && input.files[0]) {
-            let reader = new FileReader();
-            reader.onload = (e) => {
-                uploadedBase64 = e.target.result;
+window.uploadReceipt = (input) => {
+    if (input.files && input.files[0]) {
+        let file = input.files[0];
+        let reader = new FileReader();
+        reader.onload = (e) => {
+            let img = new Image();
+            img.onload = () => {
+                let canvas = document.createElement('canvas');
+                let maxWidth = 800;
+                let maxHeight = 800;
+                let width = img.width;
+                let height = img.height;
+
+                if (width > height) {
+                    if (width > maxWidth) {
+                        height *= maxWidth / width;
+                        width = maxWidth;
+                    }
+                } else {
+                    if (height > maxHeight) {
+                        width *= maxHeight / height;
+                        height = maxHeight;
+                    }
+                }
+
+                canvas.width = width;
+                canvas.height = height;
+                let ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, width, height);
+
+                uploadedBase64 = canvas.toDataURL('image/jpeg', 0.7);
                 document.getElementById('receiptPreview').style.display = 'block';
                 document.getElementById('submitReceiptBtn').style.display = 'block';
             };
-            reader.readAsDataURL(input.files[0]);
-        }
-    };
+            img.src = e.target.result;
+        };
+        reader.readAsDataURL(file);
+    }
+};
     
     window.submitWalletReq = async () => {
         let amount = document.getElementById('rechargeAmount').value;
